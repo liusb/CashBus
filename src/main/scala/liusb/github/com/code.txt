@@ -1,0 +1,96 @@
+package liusb.github.com
+
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.{PipelineStage, Pipeline}
+import org.apache.spark.ml.feature.{OneHotEncoder, StringIndexer}
+import org.apache.spark.ml.feature.{StandardScaler, Normalizer}
+import org.apache.spark.sql.{Row, SQLContext}
+import org.apache.spark.sql.types.{DoubleType, IntegerType, StructField, StructType}
+import org.apache.spark.{SparkContext, SparkConf}
+
+
+object RunApp {
+
+  def main(args: Array[String]) {
+
+    // 设置日志为警告级别，以免打印过多信息
+    Logger.getLogger("org").setLevel(Level.WARN)
+
+    // 配置并初始化上下文
+    val conf = new SparkConf().setMaster("local[3]").setAppName("CashBus")
+    conf.setJars(Seq("./out\\artifacts\\Spark_jar\\Spark.jar"))
+    System.setProperty("hadoop.home.dir", "F:\\RunEnv\\hadoop-2.7.1")
+    System.setProperty("user.name", "hadoop")
+    val spark = new SparkContext(conf)
+    val sqlContext= new SQLContext(spark)
+    val dataHelper = new DataFileHelper(sqlContext)
+
+    // 加载数据
+    val allData = dataHelper.loadData()
+
+    // 处理类别特征
+    val featuresType = dataHelper.loadTypeInfo()
+    val categoryFeatures = featuresType.filter(featuresType("type") === "category")
+      .map(row => row(0).toString).collect()
+    val indexTransformers: Array[PipelineStage] = categoryFeatures.map(
+      feature => new StringIndexer()
+        .setInputCol(feature)
+        .setOutputCol(s"${feature}Index")
+    )
+    val indexPipeline = new Pipeline().setStages(indexTransformers)
+    val allDataIndexed = indexPipeline.fit(allData).transform(allData)
+
+    val indexColumns  = allDataIndexed.columns.filter(x => x contains "Index")
+    val oneHotEncoders: Array[PipelineStage] = indexColumns.map(
+      feature => new OneHotEncoder()
+        .setInputCol(feature)
+        .setOutputCol(s"${feature}Vector")
+    )
+    val oneHotPipeline = new Pipeline().setStages(oneHotEncoders)
+    val allDataEncoded = oneHotPipeline.fit(allDataIndexed).transform(allDataIndexed)
+    allDataEncoded.show()
+
+    val joinData = dataHelper.fillLabel(allDataEncoded)
+
+    // 特征标准化归一化
+    val vectorColumns  = joinData.columns.filter(x => x contains "Vector")
+    val numericColumns = featuresType.filter(featuresType("type") === "numeric")
+      .map(row => row(0).toString).collect()
+    val featuresCol = vectorColumns ++ numericColumns
+    val standardScalers : Array[PipelineStage] = featuresCol.map(
+      feature => new StandardScaler().setWithStd(true)
+        .setWithMean(true).setInputCol(feature).setOutputCol(s"${feature}scaled")
+    )
+    val scalerPipleline = new Pipeline().setStages(standardScalers)
+    val scaledData = scalerPipleline.fit(joinData).transform(joinData)
+
+    val scaledColumns = scaledData.columns.filter(x => x contains "scaled")
+    val normalizers : Array[PipelineStage] = scaledColumns.map(
+      feature => new Normalizer().setP(2.0)
+        .setInputCol(feature).setOutputCol(s"${feature}normal")
+    )
+    val normalizerPipeline = new Pipeline().setStages(normalizers)
+    val normalData = normalizerPipeline.fit(scaledData).transform(scaledData)
+
+    val trainData = normalData.filter("y is not null")
+    val testData = normalData.filter("y is null")
+
+    val rf = new RandomForestClassifier().setFeaturesCol()
+
+    val schema = StructType(Seq(
+      StructField("uid", IntegerType, true),
+      StructField("score", DoubleType, true)))
+    val result = standTest.map(row => Row(
+      row.label.toInt, lrModel.predict(row.features)))
+    val resultDF = sqlContext.createDataFrame(result, schema)
+    resultDF.registerTempTable("result")
+
+    //    // 对模型评估
+    //    val scoreAndLabels = result.map(row => (row.getInt(0).toDouble, row.getDouble(1)))
+    //    val metrics = new BinaryClassificationMetrics(scoreAndLabels)
+    //    println(metrics.areaUnderROC())
+
+    spark.stop()
+  }
+}
